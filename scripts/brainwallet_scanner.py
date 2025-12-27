@@ -46,43 +46,58 @@ class ChainCfg:
 
 CHAINS: List[ChainCfg] = [
     ChainCfg(
-        name="Ethereum Mainnet",
+        name="Ethereum",
         chain_id=1,
         rpcs=[
-            "https://rpc.ankr.com/eth",
+            "https://eth-mainnet.g.alchemy.com/v2/4LOXL_jFvZ-CkRsrtJ3KtF5ON4nbf0_m",
             "https://eth.llamarpc.com",
-            "https://cloudflare-eth.com",
-            "https://ethereum.publicnode.com",
+            "https://rpc.mevblocker.io",
+            "https://0xrpc.io/eth",
+            "https://endpoints.omniatech.io/v1/eth/mainnet/public",
+            "https://ethereum-rpc.publicnode.com",
+            "https://eth.api.pocket.network",
+            "https://eth.merkle.io"
         ],
-        symbol="ETH",
+        symbol="eth"
     ),
     ChainCfg(
         name="Polygon",
         chain_id=137,
         rpcs=[
-            "https://polygon-rpc.com",
-            "https://rpc.ankr.com/polygon",
-            "https://polygon-bor.publicnode.com",
+            "https://1rpc.io/matic",
+            "https://poly.api.pocket.network",
+            "https://endpoints.omniatech.io/v1/matic/mainnet/public",
+            "https://polygon.drpc.org",
+            "https://polygon-bor-rpc.publicnode.com"
         ],
-        symbol="MATIC",
+        symbol="POL"
     ),
     ChainCfg(
-        name="BNB Smart Chain",
+        name="BNB",
         chain_id=56,
         rpcs=[
-            "https://bsc-dataseed.binance.org",
-            "https://rpc.ankr.com/bsc",
-            "https://bsc.publicnode.com",
+            "https://bsc-dataseed.bnbchain.org",
+            "https://bsc-dataseed-public.bnbchain.org",
+            "https://bsc-dataseed.nariox.org",
+            "https://bsc-dataseed.defibit.io",
+            "https://bsc-dataseed.ninicoin.io",
+            "https://binance.llamarpc.com",
+            "https://bsc.blockrazor.xyz",
+            "https://bsc-rpc.publicnode.com"
         ],
-        symbol="BNB",
+        symbol="bnb"
     ),
     ChainCfg(
         name="Arbitrum One",
         chain_id=42161,
         rpcs=[
+            "https://public-arb-mainnet.fastnode.io",
+            "https://arbitrum.meowrpc.com",
+            "https://arb-one.api.pocket.network",
             "https://arb1.arbitrum.io/rpc",
             "https://rpc.ankr.com/arbitrum",
             "https://arbitrum-one.publicnode.com",
+            "https://nova.arbitrum.io/rpc",
         ],
         symbol="ETH",
     ),
@@ -90,6 +105,9 @@ CHAINS: List[ChainCfg] = [
         name="Optimism",
         chain_id=10,
         rpcs=[
+            "https://optimism.drpc.org",
+            "https://public-op-mainnet.fastnode.io",
+            "https://0xrpc.io/op",
             "https://mainnet.optimism.io",
             "https://rpc.ankr.com/optimism",
             "https://optimism.publicnode.com",
@@ -472,7 +490,7 @@ class GPUBrainwalletGenerator:
 class BlockchainScanner:
     def __init__(self, rpc_timeout: int = 3, max_rpc_workers: Optional[int] = None):
         self.rpc_timeout = rpc_timeout
-        self.max_rpc_workers = max_rpc_workers or min(len(CHAINS), 8)
+        self.max_rpc_workers = 8
         self._web3_clients: Dict[str, Web3] = {}
         self._last_working_rpc: Dict[int, str] = {}
         self._lock = Lock()
