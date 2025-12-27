@@ -764,7 +764,7 @@ class BlockchainScanner:
 
     def _load_local_wallets(self) -> Dict[str, Optional[set]]:
         return {
-            "evm": self._load_address_file("evm_wallets.txt", normalize=str.lower),
+            "evm": self._load_address_file("evm_wallets.txt"),
             "BTC": self._load_address_file("btc_wallets.txt"),
             "LTC": self._load_address_file("ltc_wallets.txt"),
             "DOGE": self._load_address_file("doge_wallets.txt"),
@@ -909,8 +909,6 @@ class BlockchainScanner:
                 continue
         if best_balance > 0:
             return True, best_balance, ",".join(sources) if sources else ""
-        if last_err:
-            #print(f"{chain.symbol} API error: {last_err}")
         return False, 0.0, ""
 
     def scan_single_wallet(self, wallet: dict) -> Optional[dict]:
@@ -922,7 +920,9 @@ class BlockchainScanner:
         utxo_addresses = wallet.get("utxo_addresses", {})
         found_balances = []
         evm_local = self._local_wallets.get("evm")
-        if evm_local is not None and evm_local.contains(address):
+        result = address[2:] if address.startswith("0x") else address
+
+        if evm_local is not None and evm_local.contains(result):
             found_balances.append(
                 {
                     "chain": "EVM (local)",
@@ -942,6 +942,7 @@ class BlockchainScanner:
             utxo_items = []
             for chain in UTXO_CHAINS:
                 utxo_address = utxo_addresses.get(chain.symbol)
+                #print(f"{utxo_address}")
                 if not utxo_address:
                     utxo_items.append((chain, None, False))
                     continue
