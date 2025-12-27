@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import get_context
@@ -16,12 +18,12 @@ import ecdsa
 import numpy as np
 import pycuda.autoinit
 import pycuda.driver as drv
-from Crypto.Hash import keccak
+from Crypto.Hash import RIPEMD160, keccak
 from pycuda.compiler import SourceModule
 from web3 import Web3
 
 print("=" * 70)
-print("ETHEREUM BRAINWALLET GENERATOR - PRODUKTIONSREIF")
+print("MULTI-CHAIN BRAINWALLET GENERATOR - PRODUKTIONSREIF")
 print("Echte Ethereum-Adressen mit Keccak-256 aus pycryptodome")
 print("=" * 70)
 
@@ -42,6 +44,22 @@ class ChainCfg:
     chain_id: int
     rpcs: List[str]
     symbol: str
+
+
+@dataclass(frozen=True)
+class UtxoApiCfg:
+    name: str
+    url_template: str
+    parser: str
+
+
+@dataclass(frozen=True)
+class UtxoChainCfg:
+    name: str
+    symbol: str
+    address_version: int
+    wif_version: int
+    apis: List[UtxoApiCfg]
 
 
 CHAINS: List[ChainCfg] = [
@@ -113,6 +131,88 @@ CHAINS: List[ChainCfg] = [
             "https://optimism.publicnode.com",
         ],
         symbol="ETH",
+    ),
+]
+
+UTXO_CHAINS: List[UtxoChainCfg] = [
+    UtxoChainCfg(
+        name="Bitcoin",
+        symbol="BTC",
+        address_version=0x00,
+        wif_version=0x80,
+        apis=[
+            UtxoApiCfg(
+                name="blockstream",
+                url_template="https://blockstream.info/api/address/{address}",
+                parser="blockstream",
+            ),
+            UtxoApiCfg(
+                name="mempool",
+                url_template="https://mempool.space/api/address/{address}",
+                parser="blockstream",
+            ),
+            UtxoApiCfg(
+                name="blockchain.info",
+                url_template="https://blockchain.info/balance?active={address}",
+                parser="blockchain_info",
+            ),
+            UtxoApiCfg(
+                name="blockcypher",
+                url_template="https://api.blockcypher.com/v1/btc/main/addrs/{address}/balance",
+                parser="blockcypher",
+            ),
+        ],
+    ),
+    UtxoChainCfg(
+        name="Litecoin",
+        symbol="LTC",
+        address_version=0x30,
+        wif_version=0xB0,
+        apis=[
+            UtxoApiCfg(
+                name="blockstream",
+                url_template="https://blockstream.info/ltc/api/address/{address}",
+                parser="blockstream",
+            ),
+            UtxoApiCfg(
+                name="litecoinspace",
+                url_template="https://litecoinspace.org/api/address/{address}",
+                parser="blockstream",
+            ),
+            UtxoApiCfg(
+                name="sochain",
+                url_template="https://sochain.com/api/v2/get_address_balance/LTC/{address}",
+                parser="sochain",
+            ),
+            UtxoApiCfg(
+                name="blockcypher",
+                url_template="https://api.blockcypher.com/v1/ltc/main/addrs/{address}/balance",
+                parser="blockcypher",
+            ),
+        ],
+    ),
+    UtxoChainCfg(
+        name="Dogecoin",
+        symbol="DOGE",
+        address_version=0x1E,
+        wif_version=0x9E,
+        apis=[
+            UtxoApiCfg(
+                name="blockcypher",
+                url_template="https://api.blockcypher.com/v1/doge/main/addrs/{address}/balance",
+                parser="blockcypher",
+            ),
+            UtxoApiCfg(
+                name="sochain",
+                url_template="https://sochain.com/api/v2/get_address_balance/DOGE/{address}",
+                parser="sochain",
+            ),
+            UtxoApiCfg(
+                name="dogechain",
+                url_template="https://dogechain.info/api/v1/address/balance/{address}",
+                parser="dogechain",
+            ),
+        ],
     ),
 ]
 
@@ -200,6 +300,53 @@ class EthereumBrainwallet:
             return False
         private_key_int = int.from_bytes(private_key, "big")
         return 1 <= private_key_int < EthereumBrainwallet.SECP256K1_ORDER
+
+
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _hash160(data: bytes) -> bytes:
+    sha_hash = hashlib.sha256(data).digest()
+    ripe_hash = RIPEMD160.new()
+    ripe_hash.update(sha_hash)
+    return ripe_hash.digest()
+
+
+def _base58_encode(data: bytes) -> str:
+    num = int.from_bytes(data, "big")
+    encoded = ""
+    while num > 0:
+        num, rem = divmod(num, 58)
+        encoded = BASE58_ALPHABET[rem] + encoded
+    pad = 0
+    for byte in data:
+        if byte == 0:
+            pad += 1
+        else:
+            break
+    return "1" * pad + encoded
+
+
+def _base58check_encode(payload: bytes) -> str:
+    checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    return _base58_encode(payload + checksum)
+
+
+class UtxoBrainwallet:
+    """Brainwallet Generator für UTXO Chains (BTC/LTC/DOGE)."""
+
+    @staticmethod
+    def private_key_to_p2pkh_address(private_key: bytes, chain: UtxoChainCfg) -> str:
+        x, y = EthereumBrainwallet.private_key_to_public_key(private_key)
+        public_key = b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
+        pubkey_hash = _hash160(public_key)
+        payload = bytes([chain.address_version]) + pubkey_hash
+        return _base58check_encode(payload)
+
+    @staticmethod
+    def private_key_to_wif(private_key: bytes, chain: UtxoChainCfg) -> str:
+        payload = bytes([chain.wif_version]) + private_key
+        return _base58check_encode(payload)
 
 
 sha256_kernel_code = r"""
@@ -460,7 +607,7 @@ class GPUBrainwalletGenerator:
 
     def generate_wallets(self, passwords: List[str]) -> List[dict]:
         """Generiert komplette Wallets aus Passwörtern."""
-        print(f"\nGenerating {len(passwords)} Ethereum brainwallets...")
+        print(f"\nGenerating {len(passwords)} brainwallets (EVM + BTC/LTC/DOGE)...")
         private_keys = self.compute_private_keys_gpu(passwords)
 
         wallets: List[dict] = []
@@ -468,6 +615,17 @@ class GPUBrainwalletGenerator:
         for i, (password, private_key) in enumerate(zip(passwords, private_keys)):
             try:
                 wallet = self.brainwallet.generate_wallet_from_private_key(password, private_key)
+                utxo_addresses = {}
+                utxo_wif = {}
+                for chain in UTXO_CHAINS:
+                    utxo_addresses[chain.symbol] = UtxoBrainwallet.private_key_to_p2pkh_address(
+                        private_key, chain
+                    )
+                    utxo_wif[chain.symbol] = UtxoBrainwallet.private_key_to_wif(
+                        private_key, chain
+                    )
+                wallet["utxo_addresses"] = utxo_addresses
+                wallet["utxo_wif"] = utxo_wif
                 wallets.append(wallet)
                 if (i + 1) % 100 == 0:
                     elapsed = time.time() - start_time
@@ -482,7 +640,7 @@ class GPUBrainwalletGenerator:
 
         elapsed = time.time() - start_time
         valid_wallets = len([w for w in wallets if w.get("valid", False)])
-        print(f"\n✅ Generated {valid_wallets} valid Ethereum brainwallets in {elapsed:.2f}s")
+        print(f"\n✅ Generated {valid_wallets} valid brainwallets in {elapsed:.2f}s")
 
         return wallets
 
@@ -578,16 +736,90 @@ class BlockchainScanner:
                 self._last_working_rpc.pop(chain.chain_id, None)
             return False, 0.0, ""
 
+    def _fetch_json(self, url: str) -> dict:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "brainwallet-scanner/1.0",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=self.rpc_timeout) as response:
+            payload = response.read().decode("utf-8")
+            return json.loads(payload)
+
+    def _parse_utxo_balance(self, parser: str, data: dict, address: str) -> float:
+        if parser == "blockstream":
+            chain_stats = data.get("chain_stats", {})
+            mempool_stats = data.get("mempool_stats", {})
+            funded = chain_stats.get("funded_txo_sum", 0) + mempool_stats.get("funded_txo_sum", 0)
+            spent = chain_stats.get("spent_txo_sum", 0) + mempool_stats.get("spent_txo_sum", 0)
+            return (funded - spent) / 1e8
+        if parser == "blockcypher":
+            balance = data.get("final_balance", data.get("balance", 0))
+            return balance / 1e8
+        if parser == "blockchain_info":
+            address_info = data.get(address, {})
+            balance = address_info.get("final_balance", 0)
+            return balance / 1e8
+        if parser == "sochain":
+            payload = data.get("data", {})
+            confirmed = float(payload.get("confirmed_balance", 0))
+            unconfirmed = float(payload.get("unconfirmed_balance", 0))
+            return confirmed + unconfirmed
+        if parser == "dogechain":
+            balance = data.get("balance", 0)
+            return float(balance)
+        raise ValueError(f"Unknown UTXO parser: {parser}")
+
+    def check_utxo_balance(
+        self, address: str, chain: UtxoChainCfg, debug: bool = False
+    ) -> Tuple[bool, float, str]:
+        last_err: Optional[Exception] = None
+        best_balance = 0.0
+        sources: List[str] = []
+        for api in chain.apis:
+            url = api.url_template.format(address=address)
+            try:
+                data = self._fetch_json(url)
+                balance = self._parse_utxo_balance(api.parser, data, address)
+                if balance > best_balance:
+                    best_balance = balance
+                if balance > 0:
+                    sources.append(api.name)
+            except (urllib.error.URLError, json.JSONDecodeError, ValueError) as exc:
+                last_err = exc
+                if debug:
+                    print(f"UTXO API error ({chain.symbol}/{api.name}): {exc}")
+                continue
+        if best_balance > 0:
+            return True, best_balance, ",".join(sources) if sources else ""
+        if last_err:
+            print(f"{chain.symbol} API error: {last_err}")
+        return False, 0.0, ""
+
     def scan_single_wallet(self, wallet: dict) -> Optional[dict]:
         """Scannt ein einzelnes Wallet nach Guthaben."""
         if not wallet.get("valid", False):
             return None
 
         address = wallet["address"]
+        utxo_addresses = wallet.get("utxo_addresses", {})
         found_balances = []
 
         with ThreadPoolExecutor(max_workers=self.max_rpc_workers) as executor:
             chain_results = list(executor.map(lambda c: self.check_balance(address, c), CHAINS))
+            utxo_items = [
+                (chain, utxo_addresses.get(chain.symbol)) for chain in UTXO_CHAINS
+            ]
+            utxo_results = list(
+                executor.map(
+                    lambda item: self.check_utxo_balance(item[1], item[0])
+                    if item[1]
+                    else (False, 0.0, ""),
+                    utxo_items,
+                )
+            )
 
         for chain, (has_balance, balance, rpc) in zip(CHAINS, chain_results):
             if has_balance:
@@ -597,6 +829,17 @@ class BlockchainScanner:
                         "balance": balance,
                         "symbol": chain.symbol,
                         "rpc": rpc,
+                    }
+                )
+
+        for (chain, _address), (has_balance, balance, api) in zip(utxo_items, utxo_results):
+            if has_balance:
+                found_balances.append(
+                    {
+                        "chain": chain.name,
+                        "balance": balance,
+                        "symbol": chain.symbol,
+                        "api": api,
                     }
                 )
 
@@ -621,7 +864,7 @@ class BlockchainScanner:
             if found_wallet:
                 print(
                     f"🎉 FOUND: {found_wallet['address']} - "
-                    f"{found_wallet['total_balance']} ETH total"
+                    f"{found_wallet['total_balance']} total balance"
                 )
                 results.append(found_wallet)
 
@@ -667,7 +910,7 @@ def scan_wallets_multiprocess(
             if found_wallet:
                 print(
                     f"🎉 FOUND: {found_wallet['address']} - "
-                    f"{found_wallet['total_balance']} ETH total"
+                    f"{found_wallet['total_balance']} total balance"
                 )
                 results.append(found_wallet)
 
@@ -820,7 +1063,7 @@ def save_results(results: List[dict], base_filename: str = "ethereum_brainwallet
     txt_filename = f"{base_filename}.txt"
     with open(txt_filename, "w") as f:
         f.write("=" * 70 + "\n")
-        f.write("ETHEREUM BRAINWALLET GENERATION RESULTS\n")
+        f.write("MULTI-CHAIN BRAINWALLET GENERATION RESULTS\n")
         f.write("=" * 70 + "\n\n")
 
         f.write(f"Total wallets generated: {len(valid_wallets)}\n")
@@ -834,6 +1077,10 @@ def save_results(results: List[dict], base_filename: str = "ethereum_brainwallet
                 f.write(f"Address: {wallet['address']}\n")
                 f.write(f"Private Key: {wallet['private_key']}\n")
                 f.write(f"Public Key: {wallet['public_key']}\n")
+                if "utxo_addresses" in wallet:
+                    f.write("UTXO Addresses:\n")
+                    for symbol, address in wallet["utxo_addresses"].items():
+                        f.write(f"  {symbol}: {address}\n")
 
                 if "balances" in wallet:
                     f.write("Balances:\n")
@@ -850,6 +1097,10 @@ def save_results(results: List[dict], base_filename: str = "ethereum_brainwallet
             f.write(f"\nPassword: {wallet['password']}\n")
             f.write(f"Address: {wallet['address']}\n")
             f.write(f"Private Key: {wallet['private_key'][:64]}...\n")
+            if "utxo_addresses" in wallet:
+                f.write("UTXO Addresses:\n")
+                for symbol, address in wallet["utxo_addresses"].items():
+                    f.write(f"  {symbol}: {address}\n")
             f.write("-" * 40 + "\n")
 
         if len(valid_wallets) > 100:
@@ -871,7 +1122,7 @@ def save_streaming_summary(
     summary_filename = f"{base_filename}_summary.txt"
     with open(summary_filename, "w") as f:
         f.write("=" * 70 + "\n")
-        f.write("ETHEREUM BRAINWALLET STREAMING RESULTS\n")
+        f.write("MULTI-CHAIN BRAINWALLET STREAMING RESULTS\n")
         f.write("=" * 70 + "\n\n")
         f.write(f"Total wallets scanned: {total_wallets}\n")
         f.write(f"Wallets with balance: {wallets_with_balance}\n")
@@ -913,7 +1164,7 @@ def verify_implementation():
 def main():
     """Hauptfunktion."""
     print("\n" + "=" * 70)
-    print("ETHEREUM BRAINWALLET GENERATOR")
+    print("MULTI-CHAIN BRAINWALLET GENERATOR")
     print("=" * 70)
 
     verify_implementation()
