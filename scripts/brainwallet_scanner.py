@@ -730,8 +730,6 @@ class BlockchainScanner:
             return False, 0.0, rpc
 
         except Exception as e:
-            print(f"{e}")
-
             if hasattr(self, "_last_working_rpc"):
                 self._last_working_rpc.pop(chain.chain_id, None)
             return False, 0.0, ""
@@ -795,7 +793,7 @@ class BlockchainScanner:
         if best_balance > 0:
             return True, best_balance, ",".join(sources) if sources else ""
         if last_err:
-            print(f"{chain.symbol} API error: {last_err}")
+            #print(f"{chain.symbol} API error: {last_err}")
         return False, 0.0, ""
 
     def scan_single_wallet(self, wallet: dict) -> Optional[dict]:
