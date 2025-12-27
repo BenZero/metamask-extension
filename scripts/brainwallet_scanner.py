@@ -307,7 +307,7 @@ class LocalAddressLookup:
 
     def contains(self, address: str) -> bool:
         if not self.is_enabled():
-            return True
+            return False
         normalized = self.normalize(address)
         if self.addresses is not None:
             return normalized in self.addresses
@@ -922,14 +922,20 @@ class BlockchainScanner:
         utxo_addresses = wallet.get("utxo_addresses", {})
         found_balances = []
         evm_local = self._local_wallets.get("evm")
-        evm_allowed = True
-        if evm_local is not None and evm_local.is_enabled():
-            evm_allowed = evm_local.contains(address)
+        if evm_local is not None and evm_local.contains(address):
+            found_balances.append(
+                {
+                    "chain": "EVM (local)",
+                    "balance": 0.0,
+                    "symbol": "EVM",
+                    "rpc": "local",
+                }
+            )
 
         with ThreadPoolExecutor(max_workers=self.max_rpc_workers) as executor:
             chain_results = list(
                 executor.map(
-                    lambda c: self.check_balance(address, c) if evm_allowed else (False, 0.0, ""),
+                    lambda c: self.check_balance(address, c),
                     CHAINS,
                 )
             )
@@ -940,10 +946,16 @@ class BlockchainScanner:
                     utxo_items.append((chain, None, False))
                     continue
                 local_lookup = self._local_wallets.get(chain.symbol)
-                allowed = True
-                if local_lookup is not None and local_lookup.is_enabled():
-                    allowed = local_lookup.contains(utxo_address)
-                utxo_items.append((chain, utxo_address, allowed))
+                if local_lookup is not None and local_lookup.contains(utxo_address):
+                    found_balances.append(
+                        {
+                            "chain": chain.name,
+                            "balance": 0.0,
+                            "symbol": chain.symbol,
+                            "api": "local",
+                        }
+                    )
+                utxo_items.append((chain, utxo_address, True))
             utxo_results = list(
                 executor.map(
                     lambda item: self.check_utxo_balance(item[1], item[0])
