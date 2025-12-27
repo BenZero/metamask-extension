@@ -5,6 +5,7 @@ os.add_dll_directory(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\
 import hashlib
 import json
 import os
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -215,6 +216,108 @@ UTXO_CHAINS: List[UtxoChainCfg] = [
         ],
     ),
 ]
+
+
+class LocalAddressLookup:
+    def __init__(
+        self,
+        path: str,
+        normalize=None,
+        max_in_memory_bytes: int = 100 * 1024 * 1024,
+    ):
+        self.path = path
+        self.normalize = normalize or (lambda value: value)
+        self.max_in_memory_bytes = max_in_memory_bytes
+        self.addresses: Optional[set] = None
+        self.db_path = f"{path}.sqlite3"
+        self._db_lock = Lock()
+        if not os.path.exists(path):
+            return
+        file_size = os.path.getsize(path)
+        if file_size <= self.max_in_memory_bytes:
+            self.addresses = self._load_set()
+        else:
+            self._ensure_sqlite_index()
+
+    def _load_set(self) -> set:
+        addresses = set()
+        with open(self.path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                value = line.strip()
+                if value:
+                    addresses.add(self.normalize(value))
+        return addresses
+
+    def _ensure_sqlite_index(self) -> None:
+        if self._sqlite_index_up_to_date():
+            return
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE addresses (address TEXT PRIMARY KEY)")
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            insert_sql = "INSERT OR IGNORE INTO addresses(address) VALUES (?)"
+            batch: List[Tuple[str]] = []
+            with open(self.path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    value = line.strip()
+                    if not value:
+                        continue
+                    batch.append((self.normalize(value),))
+                    if len(batch) >= 10000:
+                        conn.executemany(insert_sql, batch)
+                        batch.clear()
+            if batch:
+                conn.executemany(insert_sql, batch)
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?)",
+                ("source_mtime", str(os.path.getmtime(self.path))),
+            )
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?)",
+                ("source_size", str(os.path.getsize(self.path))),
+            )
+            conn.commit()
+
+    def _sqlite_index_up_to_date(self) -> bool:
+        if not os.path.exists(self.db_path):
+            return False
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    ("source_mtime",),
+                ).fetchone()
+                if not row or float(row[0]) != os.path.getmtime(self.path):
+                    return False
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    ("source_size",),
+                ).fetchone()
+                if not row or int(row[0]) != os.path.getsize(self.path):
+                    return False
+                return True
+        except sqlite3.Error:
+            return False
+
+    def is_enabled(self) -> bool:
+        return os.path.exists(self.path)
+
+    def contains(self, address: str) -> bool:
+        if not self.is_enabled():
+            return True
+        normalized = self.normalize(address)
+        if self.addresses is not None:
+            return normalized in self.addresses
+        with self._db_lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM addresses WHERE address = ? LIMIT 1",
+                    (normalized,),
+                ).fetchone()
+                return row is not None
 
 
 class EthereumBrainwallet:
@@ -652,6 +755,20 @@ class BlockchainScanner:
         self._web3_clients: Dict[str, Web3] = {}
         self._last_working_rpc: Dict[int, str] = {}
         self._lock = Lock()
+        self._local_wallets = self._load_local_wallets()
+
+    def _load_address_file(self, filename: str, normalize=None) -> Optional["LocalAddressLookup"]:
+        base_dir = os.path.dirname(__file__)
+        path = os.path.join(base_dir, filename)
+        return LocalAddressLookup(path, normalize=normalize)
+
+    def _load_local_wallets(self) -> Dict[str, Optional[set]]:
+        return {
+            "evm": self._load_address_file("evm_wallets.txt", normalize=str.lower),
+            "BTC": self._load_address_file("btc_wallets.txt"),
+            "LTC": self._load_address_file("ltc_wallets.txt"),
+            "DOGE": self._load_address_file("doge_wallets.txt"),
+        }
 
     def _get_web3(self, rpc: str) -> Web3:
         if rpc not in self._web3_clients:
@@ -804,16 +921,33 @@ class BlockchainScanner:
         address = wallet["address"]
         utxo_addresses = wallet.get("utxo_addresses", {})
         found_balances = []
+        evm_local = self._local_wallets.get("evm")
+        evm_allowed = True
+        if evm_local is not None and evm_local.is_enabled():
+            evm_allowed = evm_local.contains(address)
 
         with ThreadPoolExecutor(max_workers=self.max_rpc_workers) as executor:
-            chain_results = list(executor.map(lambda c: self.check_balance(address, c), CHAINS))
-            utxo_items = [
-                (chain, utxo_addresses.get(chain.symbol)) for chain in UTXO_CHAINS
-            ]
+            chain_results = list(
+                executor.map(
+                    lambda c: self.check_balance(address, c) if evm_allowed else (False, 0.0, ""),
+                    CHAINS,
+                )
+            )
+            utxo_items = []
+            for chain in UTXO_CHAINS:
+                utxo_address = utxo_addresses.get(chain.symbol)
+                if not utxo_address:
+                    utxo_items.append((chain, None, False))
+                    continue
+                local_lookup = self._local_wallets.get(chain.symbol)
+                allowed = True
+                if local_lookup is not None and local_lookup.is_enabled():
+                    allowed = local_lookup.contains(utxo_address)
+                utxo_items.append((chain, utxo_address, allowed))
             utxo_results = list(
                 executor.map(
                     lambda item: self.check_utxo_balance(item[1], item[0])
-                    if item[1]
+                    if item[1] and item[2]
                     else (False, 0.0, ""),
                     utxo_items,
                 )
@@ -830,7 +964,10 @@ class BlockchainScanner:
                     }
                 )
 
-        for (chain, _address), (has_balance, balance, api) in zip(utxo_items, utxo_results):
+        for (chain, _address, _allowed), (has_balance, balance, api) in zip(
+            utxo_items,
+            utxo_results,
+        ):
             if has_balance:
                 found_balances.append(
                     {
