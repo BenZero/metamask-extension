@@ -230,6 +230,7 @@ class LocalAddressLookup:
         self.max_in_memory_bytes = max_in_memory_bytes
         self.addresses: Optional[set] = None
         self.db_path = f"{path}.sqlite3"
+        self._label = os.path.basename(path)
         self._db_lock = Lock()
         if not os.path.exists(path):
             return
@@ -239,13 +240,34 @@ class LocalAddressLookup:
         else:
             self._ensure_sqlite_index()
 
+    def _progress(self, processed_bytes: int, total_bytes: int, action: str) -> None:
+        if total_bytes <= 0:
+            return
+        percent = min(100.0, (processed_bytes / total_bytes) * 100)
+        print(
+            f"  [{self._label}] {action}: {percent:5.1f}% "
+            f"({processed_bytes:,}/{total_bytes:,} bytes)",
+            end="\r",
+        )
+
+    def _finish_progress(self, action: str) -> None:
+        print(f"  [{self._label}] {action}: 100.0%".ljust(60))
+
     def _load_set(self) -> set:
         addresses = set()
+        total_bytes = os.path.getsize(self.path)
+        report_every = max(1024 * 1024, total_bytes // 100)
+        next_report = report_every
         with open(self.path, "r", encoding="utf-8") as handle:
             for line in handle:
                 value = line.strip()
                 if value:
                     addresses.add(self.normalize(value))
+                position = handle.tell()
+                if position >= next_report:
+                    self._progress(position, total_bytes, "Lade lokale DB")
+                    next_report += report_every
+        self._finish_progress("Lade lokale DB")
         return addresses
 
     def _ensure_sqlite_index(self) -> None:
@@ -260,6 +282,9 @@ class LocalAddressLookup:
             conn.execute("PRAGMA synchronous=NORMAL")
             insert_sql = "INSERT OR IGNORE INTO addresses(address) VALUES (?)"
             batch: List[Tuple[str]] = []
+            total_bytes = os.path.getsize(self.path)
+            report_every = max(1024 * 1024, total_bytes // 100)
+            next_report = report_every
             with open(self.path, "r", encoding="utf-8") as handle:
                 for line in handle:
                     value = line.strip()
@@ -269,6 +294,10 @@ class LocalAddressLookup:
                     if len(batch) >= 10000:
                         conn.executemany(insert_sql, batch)
                         batch.clear()
+                    position = handle.tell()
+                    if position >= next_report:
+                        self._progress(position, total_bytes, "Indexiere lokale DB")
+                        next_report += report_every
             if batch:
                 conn.executemany(insert_sql, batch)
             conn.execute(
@@ -280,6 +309,7 @@ class LocalAddressLookup:
                 ("source_size", str(os.path.getsize(self.path))),
             )
             conn.commit()
+        self._finish_progress("Indexiere lokale DB")
 
     def _sqlite_index_up_to_date(self) -> bool:
         if not os.path.exists(self.db_path):
